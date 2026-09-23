@@ -1,0 +1,61 @@
+---
+title: "Assignment 4"
+format: 
+    html:
+        output-file: "index.html" 
+       
+---
+
+## Problem 1:
+
+```{r}
+#|  echo: false
+#|  warning: false
+library(dplyr)
+library(tidyr)
+library(reactable)
+```
+
+
+The `timesData` dataset can be displayed with an interative data table.
+
+```{r}
+df <- read.csv("https://manctsui.github.io/datasets/timesData.csv")
+reactable(df, defaultPageSize = 4, filterable = TRUE, searchable = TRUE)
+```
+
+## Problem 2:
+To determine the rankings through the years of the undergraduate alma mater of the instructor for this course, we can use grepl to filter the dataset for the specific university name.
+```{r}
+df_filtered <- df |> filter(grepl("University of California, Los Angeles", university_name))
+df_filtered |> select(year, world_rank, university_name) |> arrange(year) |> reactable(defaultPageSize = 6, filterable = TRUE, searchable = TRUE)
+```
+
+## Problem 3:
+To plot the instructor's undergraduate alma mater as year vs university rank, the standard plot function is used. The x-axis represents the year, and the y-axis represents the world rank of the university. The plot is created using the filtered dataset for the University of California, Los Angeles.
+
+```{r}
+plot(as.numeric(df_filtered$year), df_filtered$world_rank, type = "l", xlab = "Year", ylab = "World Rank", main = "Ranking of University of California, Los Angeles")
+```
+
+## Problem 4:
+To do the same for Unversity of California, Berkeley, we can filter the dataset for that specific university name and create a similar plot.
+```{r}
+#| layout-ncol: 2
+#| fig-cap: "Berkeley vs Los Angeles plots"
+#| fig-subcap: 
+#|   - "Berkeley"
+#|   - "Los Angeles"
+df_filtered_berkeley <- df |> filter(grepl("University of California, Berkeley", university_name))
+plot(as.numeric(df_filtered_berkeley$year), df_filtered_berkeley$world_rank, type = "l", xlab = "Year", ylab = "World Rank", main = "Ranking of University of California, Berkeley")
+plot(as.numeric(df_filtered$year), df_filtered$world_rank, type = "l", xlab = "Year", ylab = "World Rank", main = "Ranking of University of California, Los Angeles")
+```
+
+## Problem 5:
+To determine if the number of US universities that rank in the top 50 change much through the years, we can filter the dataset for universities in the United States and with a world rank of 50 or less. Then, we can group the data by year and count the number of universities that meet these criteria.
+```{r}
+df_us_top50 <- df |> filter(country == "United States of America", world_rank <= 50)
+df_us_top50_count <- df_us_top50 |> group_by(year) |> summarise(count = n(), unique_inst = n_distinct(university_name))
+df_us_top50_count |> reactable(defaultPageSize = 6, filterable = TRUE, searchable = TRUE)
+```
+It is evident that the number of US universities in the top 50 has greatly increased over the years, indicating a positive trend in the global ranking of US universities, and in particular, the number of unique institutions has also increased, suggesting that more universities are achieving top 50 rankings simultaneously.
