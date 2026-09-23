@@ -54,8 +54,26 @@ plot(as.numeric(df_filtered$year), df_filtered$world_rank, type = "l", xlab = "Y
 ## Problem 5:
 To determine if the number of US universities that rank in the top 50 change much through the years, we can filter the dataset for universities in the United States and with a world rank of 50 or less. Then, we can group the data by year and count the number of universities that meet these criteria.
 ```{r}
-df_us_top50 <- df |> filter(country == "United States of America", world_rank <= 50)
-df_us_top50_count <- df_us_top50 |> group_by(year) |> summarise(count = n(), unique_inst = n_distinct(university_name))
-df_us_top50_count |> reactable(defaultPageSize = 6, filterable = TRUE, searchable = TRUE)
+df_us_top50 <- df |>
+  filter(country == "United States of America") |>
+  mutate(world_rank_num = as.numeric(gsub("[^0-9]", "", world_rank))) |>
+  filter(world_rank_num <= 50) |>
+  arrange(year, world_rank_num, university_name) |>
+  distinct(university_name, year, .keep_all = TRUE)
+
+# 2. Summarize metrics per year
+df_us_top50_count <- df_us_top50 |>
+  group_by(year) |>
+  summarise(
+    total_us_top50_univs = n_distinct(university_name),
+    distinct_rank_positions = n_distinct(world_rank_num),
+    .groups = "drop"
+  )
+
+# 3. Render table
+df_us_top50_count |>
+  reactable(defaultPageSize = 6, filterable = TRUE, searchable = TRUE)
+
+plot(df_us_top50_count$year, df_us_top50_count$total_us_top50_univs, type = "l", xlab = "Year", ylab = "Number of US Universities in Top 50", main = "US Universities in Top 50 Over the Years")
 ```
-It is evident that the number of US universities in the top 50 has greatly increased over the years, indicating a positive trend in the global ranking of US universities, and in particular, the number of unique institutions has also increased, suggesting that more universities are achieving top 50 rankings simultaneously.
+It is evident that the number of US universities in the top 50 has stayed consistent over the years, indicating a relatively neutral trend in the global ranking of US universities. It is also worth noting that the number of top 50 universities is steadily decreasing in more recent years, suggesting a potential decline in the representation of US universities within the top global rankings.
