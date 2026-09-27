@@ -1,0 +1,147 @@
+---
+title: "Lesson 6 Assignment"
+format: 
+    html:
+        output-file: "index.html" 
+---
+
+## Problem 1a:
+
+```{r}
+#|  echo: false
+#|  warning: false
+library(dplyr)
+library(tidyr)
+library(reactable)
+library(plotly)
+library(crosstalk)
+```
+
+The `timesData` dataset can be displayed with an interative data table with respect to the number of times each country's universities are featured in the rankings.
+
+```{r}
+df <- read.csv("https://manctsui.github.io/datasets/timesData.csv")
+# To display the countries and the number of times their universities are featured in the rankings, we perform the following pipeline of data wrangling steps:
+df |>
+  group_by(country) |>
+  summarise(num_rankings = n()) |>
+  arrange(desc(num_rankings)) |>
+  head(3) |>
+  reactable(defaultPageSize = 4, filterable = TRUE, searchable = TRUE, columns = list(
+    country = colDef(name = "Country Name"),
+    num_rankings = colDef(name = "Number of Features")))
+```
+
+## Problem 1b:
+```{r}
+df |>
+  group_by(country) |>
+  summarise(num_rankings = n()) |>
+  arrange(desc(num_rankings)) |>
+  head(3) |>
+  plot_ly(x = ~country, y = ~num_rankings, type = "bar") |>
+  layout(title = "Top 3 Countries by University Features in Rankings",
+         xaxis = list(title = "Country"),
+         yaxis = list(title = "Number of Rankings"))
+```
+
+## Problem 2a:
+```{r}
+# To display the top 50 universities in the world in 2011, and output the rank and the university name, we can filter the dataset for the year 2011 and the world rank of 50 or less. Then, we can select the relevant columns and arrange the data by world rank.
+df |> 
+  filter(year == 2011, as.numeric(gsub("[^0-9]", "", world_rank)) <= 50) |>
+  select(world_rank, university_name) |>
+  arrange(as.numeric(gsub("[^0-9]", "", world_rank))) |>
+  reactable(defaultPageSize = 6, filterable = TRUE, searchable = TRUE)
+```
+
+## Problem 2b:
+
+If we turn the dataframe from problem 1A into a SharedData object, the `$rank` column would not a be a suitable column to use as a key, as rank is not unique for each row in the dataframe. Instead, we can use the `$country` column as a key, as it is unique for each university and can be used to identify each row in the dataframe. Using the rank is more applicable for problem 2A, where we are filtering the data based on the rank of the university. In that case, we can use the `$rank` column as a filter to narrow down our selection of universities based on their rank in the year of 2011.
+
+## Problem 2c:
+
+To create a filter slider from crosstalk that allows us to narrow our selection of universities based on the rank of the
+university, we can use the `filter_slider` function from the crosstalk package. This function creates a slider that allows us to filter the data based on a numeric column, in this case, the world rank of the university. We can specify the range of the slider and the column to filter on, and the resulting filtered data will be displayed in a reactive table or plot.
+
+```{r}
+df2a <- df |>
+  filter(year == 2011) |>
+  # 1. Save the numeric conversion as a new column
+  mutate(numeric_rank = as.numeric(gsub("[^0-9]", "", world_rank))) |>
+  filter(numeric_rank <= 50) |>
+  # 2. Keep the numeric column in your dataframe
+  select(numeric_rank, university_name) |>
+  arrange(numeric_rank)
+
+# 3. Use the numeric column for the key is slow, so we let the default javasript row index be the key instead.
+shared_df <- SharedData$new(df2a)
+
+ 
+filter_slider(
+  id = "rank_slider", 
+  label = "Select Rank Range", 
+  sharedData = shared_df, 
+    # 4. Point the slider to the numeric column
+  column = ~numeric_rank, 
+  step = 1, 
+  width = "100%"
+)
+reactable(shared_df)
+
+```
+
+## Problem 3:
+```{r}
+#| label: prob-3
+# Clean the 2016 data by converting text to numerics and removing commas
+data_2016 <- df |>
+  filter(year == 2016) |>
+  mutate(
+    num_students = as.numeric(gsub(",", "", num_students)),
+    student_staff_ratio = as.numeric(student_staff_ratio),
+    teaching = as.numeric(teaching)
+  ) |>
+  drop_na(num_students, student_staff_ratio, teaching)
+
+shared_2016 <- SharedData$new(data_2016)
+
+# First scatterplot
+p1 <- plot_ly(
+  shared_2016, 
+  x = ~num_students,
+  y = ~student_staff_ratio, 
+  type = "scatter", 
+  mode = "markers", 
+  text = ~university_name, 
+  hoverinfo = "text+x+y",
+  name = "Students"
+) %>%
+  layout(
+    yaxis = list(title = "Student-Staff Ratio"),
+    xaxis = list(title = "Number of Students")
+  )
+
+# Second scatterplot
+p2 <- plot_ly(
+  shared_2016, 
+  x = ~student_staff_ratio,
+  y = ~teaching, 
+  type = "scatter", 
+  mode = "markers", 
+  text = ~university_name, 
+  hoverinfo = "text+x+y",
+  name = "Teaching"
+) %>%
+  layout(
+    yaxis = list(title = "Teaching Score"),
+    xaxis = list(title = "Student-Staff Ratio")
+  )
+
+# Link them side-by-side
+bscols(
+  widths = c(6, 6),
+  p1, 
+  p2
+)
+```
