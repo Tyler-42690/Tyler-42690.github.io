@@ -97,30 +97,35 @@ column for "Industry" for the `countries` dataset, the following code can be use
 ```{r}
 # Load the countries dataset
 df <- read.csv("http://manctsui.github.io/datasets/countries.csv")
-df$Agriculture_imputed <- ifelse(is.na(df$Agriculture), mean(as.numeric(df$ Agriculture), na.rm = TRUE), as.numeric(df$Agriculture))
-df$Industry_imputed <- ifelse(is.na(df$Industry), mean(as.numeric(df$ Industry), na.rm = TRUE), as.numeric(df$Industry))
 
-df |> select(Country, Agriculture, Agriculture_imputed, Industry, Industry_imputed) |> head(6) |> reactable(defaultPageSize = 6, filterable = FALSE, searchable = FALSE)
+
+df_grouped <- df  |>
+  group_by(Region) |>
+  mutate(Agriculture_imputed = ifelse(is.na(Agriculture), mean(Agriculture, na.rm = TRUE), Agriculture),
+         Industry_imputed = ifelse(is.na(Industry), mean(Industry, na.rm = TRUE), Industry)) |> ungroup()
+
+
+df_grouped |> select(Country, Region, Agriculture, Agriculture_imputed, Industry, Industry_imputed)  |> reactable(defaultPageSize = 6, filterable = FALSE, searchable = FALSE)
 ```
 
 ## Problem 3B:
 To then find out how many countries were filled in with mean imputation, we can compare the number of missing values before and after the imputation.
 
 ```{r}
-# Count missing values before imputation
-missing_before <- sum(is.na(df$Agriculture)) + sum(is.na(df$Industry))
-
-# Count missing values after imputation
-missing_after <- sum(is.na(df$Agriculture_imputed)) + sum(is.na(df$Industry_imputed))
-
-# Calculate the number of countries filled in
-countries_filled <- missing_before - missing_after
-
-cat("Number of countries filled in with mean imputation:", countries_filled, "\n")
+df_grouped |>
+  group_by(Region) |>
+  summarise(
+    across(
+      c(Agriculture, Industry),
+      ~ sum(is.na(.))
+    ),
+    .groups = "drop"
+  ) |>
+  reactable(defaultPageSize = 11, filterable = FALSE, searchable = FALSE)
 
 ```
 
-The missing_before value is equal to the countries_filled value, since we are only filling in missing values with mean imputation.
+The NAs before value is equal to the countries filled value, since we are only filling in missing values with mean imputation.
 
 ## Problem 4:
 We then consider the linear regression model between the variables below
