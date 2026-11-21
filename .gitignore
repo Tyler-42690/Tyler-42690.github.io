@@ -48,4 +48,14 @@ coverage.xml
 
 # Sphinx documentation
 docs/_build/
-   
+
+*.npz
+*_cache/
+*_files/
+.quarto/
+
+# Python virtual environments
+.venv/
+venv/
+env/
+ENV/

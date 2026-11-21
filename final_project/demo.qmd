@@ -1,0 +1,269 @@
+---
+title: "SVD_Demo"
+format:
+  html:
+    output-file: "index.html"
+    embed-resources: true
+    toc: true
+execute:
+  echo: true
+  warning: false
+  error: true
+  cache: true
+---
+```{python}
+
+
+from pathlib import Path
+import numpy as np
+import kagglehub
+
+
+def parse_probe_set(probe_path: Path) -> set[tuple[int, int]]:
+    """Parses probe.txt into a set of (movie_id, user_id) pairs."""
+    probe_pairs = set()
+    current_movie = None
+    with open(probe_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            if line.endswith(":"):
+                current_movie = int(line[:-1])
+            else:
+                probe_pairs.add((current_movie, int(line)))
+    return probe_pairs
+
+
+def build_netflix_arrays(data_dir: str, out_npz: str = "netflix_processed.npz"):
+    '''
+    Builds numpy arrays for the Netflix Prize dataset and saves them to a compressed .npz file.
+    The arrays are:
+    - train_u: user indices for training ratings
+    - train_i: movie indices for training ratings
+    - train_r: ratings for training ratings
+    - val_u: user indices for validation ratings
+    - val_i: movie indices for validation ratings
+    - val_r: ratings for validation ratings
+    - n_users: number of unique users
+    - n_items: number of unique movies
+    '''
+    data_path = Path(data_dir)
+    probe_pairs = parse_probe_set(data_path / "probe.txt")
+
+    # Pre-allocate arrays for ~100.5M total ratings to avoid Python list overhead
+    max_ratings = 101_000_000
+    raw_users = np.empty(max_ratings, dtype=np.int32)
+    raw_movies = np.empty(max_ratings, dtype=np.int16)
+    raw_ratings = np.empty(max_ratings, dtype=np.float32)
+    is_probe = np.zeros(max_ratings, dtype=bool)
+
+    idx = 0
+    for part in range(1, 5):
+        file_path = data_path / f"combined_data_{part}.txt"
+        print(f"Parsing {file_path.name}...")
+        current_movie = 0
+        with open(file_path, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                if line.endswith(":"):
+                    current_movie = int(line[:-1])
+                else:
+                    # Format: CustomerID,Rating,Date
+                    comma1 = line.find(",")
+                    comma2 = line.find(",", comma1 + 1)
+                    user_id = int(line[:comma1])
+                    rating = float(line[comma1 + 1 : comma2])
+
+                    raw_users[idx] = user_id
+                    raw_movies[idx] = current_movie
+                    raw_ratings[idx] = rating
+                    if (current_movie, user_id) in probe_pairs:
+                        is_probe[idx] = True
+                    idx += 1
+
+    # Trim to exact count
+    raw_users = raw_users[:idx]
+    raw_movies = raw_movies[:idx]
+    raw_ratings = raw_ratings[:idx]
+    is_probe = is_probe[:idx]
+
+    # Map non-contiguous user IDs (up to ~2.6M) to contiguous [0, n_users)
+    unique_users, user_indices = np.unique(raw_users, return_inverse=True)
+    # Movie IDs are 1..17770 -> shift to 0-indexed
+    movie_indices = (raw_movies - 1).astype(np.int32)
+    user_indices = user_indices.astype(np.int32)
+
+    train_mask = ~is_probe
+    np.savez_compressed(
+        out_npz,
+        train_u=user_indices[train_mask],
+        train_i=movie_indices[train_mask],
+        train_r=raw_ratings[train_mask],
+        val_u=user_indices[is_probe],
+        val_i=movie_indices[is_probe],
+        val_r=raw_ratings[is_probe],
+        n_users=len(unique_users),
+        n_items=int(movie_indices.max() + 1),
+    )
+    print(f"Saved {train_mask.sum():,} train and {is_probe.sum():,} probe ratings to {out_npz}")
+
+def resolve_netflix_dir(download_path: str) -> Path:
+    """Finds the folder containing probe.txt and combined_data_*.txt files."""
+    root = Path(download_path)
+    if (root / "probe.txt").exists():
+        return root
+    for candidate in root.rglob("probe.txt"):
+        return candidate.parent
+    raise FileNotFoundError(f"Could not find probe.txt under {root}")
+
+
+# 1. Download via kagglehub (uses local cache on subsequent runs)
+dataset_path = kagglehub.dataset_download("netflix-inc/netflix-prize-data")
+netflix_dir = resolve_netflix_dir(dataset_path)
+print("Resolved dataset directory:", netflix_dir)
+
+# 2. Parse text files once into compressed NumPy arrays
+npz_file = Path("netflix_processed.npz")
+if not npz_file.exists():
+    build_netflix_arrays(data_dir=str(netflix_dir), out_npz=str(npz_file))
+```
+
+
+```{python}
+
+import numpy as np
+from numba import njit
+
+
+@njit(fastmath=True)
+def _sgd_epoch(u_idx, i_idx, ratings, perm, mu, bu, bi, P, Q, lr, reg):
+    n_factors = P.shape[1]
+    for step in range(len(perm)):
+        idx = perm[step]
+        u = u_idx[idx]
+        i = i_idx[idx]
+        r = ratings[idx]
+
+        dot = 0.0
+        for f in range(n_factors):
+            dot += P[u, f] * Q[i, f]
+
+        pred = mu + bu[u] + bi[i] + dot
+        err = r - pred
+
+        bu[u] += lr * (err - reg * bu[u])
+        bi[i] += lr * (err - reg * bi[i])
+
+        for f in range(n_factors):
+            p_uf = P[u, f]
+            q_if = Q[i, f]
+            P[u, f] = p_uf + lr * (err * q_if - reg * p_uf)
+            Q[i, f] = q_if + lr * (err * p_uf - reg * q_if)
+
+
+@njit(fastmath=True)
+def _compute_rmse(u_idx, i_idx, ratings, mu, bu, bi, P, Q):
+    n_factors = P.shape[1]
+    sq_err = 0.0
+    n = len(ratings)
+    for idx in range(n):
+        u = u_idx[idx]
+        i = i_idx[idx]
+        dot = 0.0
+        for f in range(n_factors):
+            dot += P[u, f] * Q[i, f]
+        pred = mu + bu[u] + bi[i] + dot
+        if pred < 1.0:
+            pred = 1.0
+        elif pred > 5.0:
+            pred = 5.0
+        diff = ratings[idx] - pred
+        sq_err += diff * diff
+    return np.sqrt(sq_err / n)
+
+
+class NetflixFunkSVD:
+    def __init__(self, n_factors=64, lr=0.005, reg=0.02, lr_decay=0.92, n_epochs=25, seed=42):
+        self.n_factors = n_factors
+        self.lr = lr
+        self.reg = reg
+        self.lr_decay = lr_decay
+        self.n_epochs = n_epochs
+        self.seed = seed
+
+    def fit(self, npz_path: str):
+        data = np.load(npz_path)
+        train_u = data["train_u"]
+        train_i = data["train_i"]
+        train_r = data["train_r"]
+        val_u = data["val_u"]
+        val_i = data["val_i"]
+        val_r = data["val_r"]
+        n_users = int(data["n_users"])
+        n_items = int(data["n_items"])
+
+        rng = np.random.default_rng(self.seed)
+        self.mu = np.float32(np.mean(train_r))
+        self.bu = np.zeros(n_users, dtype=np.float32)
+        self.bi = np.zeros(n_items, dtype=np.float32)
+
+        scale = 0.1 / np.sqrt(self.n_factors)
+        self.P = rng.normal(0.0, scale, size=(n_users, self.n_factors)).astype(np.float32)
+        self.Q = rng.normal(0.0, scale, size=(n_items, self.n_factors)).astype(np.float32)
+
+        curr_lr = np.float32(self.lr)
+        reg = np.float32(self.reg)
+        n_obs = len(train_r)
+
+        for epoch in range(1, self.n_epochs + 1):
+            perm = rng.permutation(n_obs).astype(np.int32)
+            _sgd_epoch(train_u, train_i, train_r, perm, self.mu, self.bu, self.bi, self.P, self.Q, curr_lr, reg)
+            probe_rmse = _compute_rmse(val_u, val_i, val_r, self.mu, self.bu, self.bi, self.P, self.Q)
+            print(f"Epoch {epoch:02d}/{self.n_epochs:02d} | lr={curr_lr:.5f} | Probe RMSE: {probe_rmse:.4f}", flush=True)
+            curr_lr = np.float32(curr_lr * self.lr_decay)
+
+        return self
+```
+
+```{python}
+#|  label: run_pipeline
+from pathlib import Path
+import kagglehub
+
+
+def run_netflix_pipeline(
+    out_npz: str = "netflix_processed.npz",
+    n_factors: int = 64,
+    lr: float = 0.006,
+    reg: float = 0.025,
+    lr_decay: float = 0.92,
+    n_epochs: int = 25,
+    seed: int = 42,
+):
+    npz_path = Path(out_npz)
+
+    if not npz_path.exists():
+        raw_download = kagglehub.dataset_download("netflix-inc/netflix-prize-data")
+        data_dir = resolve_netflix_dir(raw_download)
+        build_netflix_arrays(data_dir=str(data_dir), out_npz=str(npz_path))
+    else:
+        print(f"Found existing preprocessed dataset at {npz_path}; skipping download/parse.")
+
+    model = NetflixFunkSVD(
+        n_factors=n_factors,
+        lr=lr,
+        reg=reg,
+        lr_decay=lr_decay,
+        n_epochs=n_epochs,
+        seed=seed,
+    )
+    model.fit(str(npz_path))
+    return model
+
+
+
+trained_model = run_netflix_pipeline()
+```
