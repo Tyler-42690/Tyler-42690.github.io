@@ -11,6 +11,7 @@ execute:
   error: true
   cache: true
 ---
+
 ```{python}
 
 
@@ -131,10 +132,50 @@ if not npz_file.exists():
     build_netflix_arrays(data_dir=str(netflix_dir), out_npz=str(npz_file))
 ```
 
+```{python}
+from scipy import sparse
+from scipy.sparse.linalg import svds
+
+
+def truncated_svd_baseline(npz_path: str, k: int = 20, max_rows: int | None = None) -> dict:
+    data = np.load(npz_path)
+    u = data["train_u"]
+    i = data["train_i"]
+    r = data["train_r"].astype(np.float64)
+    n_users = int(data["n_users"])
+    n_items = int(data["n_items"])
+
+    if max_rows is not None and len(r) > max_rows:
+        u = u[:max_rows]
+        i = i[:max_rows]
+        r = r[:max_rows]
+
+    global_mean = float(np.mean(r))
+    item_sums = np.bincount(i, weights=r - global_mean, minlength=n_items)
+    item_counts = np.bincount(i, minlength=n_items)
+    item_bias = np.where(item_counts > 0, item_sums / np.maximum(item_counts, 1), 0.0)
+
+    centered_vals = r - global_mean - item_bias[i]
+    R_sparse = sparse.csr_matrix((centered_vals, (u, i)), shape=(n_users, n_items))
+
+    # svds requires 1 <= k < min(R_sparse.shape)
+    max_k = min(R_sparse.shape) - 1
+    k_eff = min(k, max_k)
+
+    U, s, Vt = svds(R_sparse, k=k_eff)
+    order = np.argsort(-s)
+    U, s, Vt = U[:, order], s[order], Vt[order, :]
+
+    return {
+        "U": U,
+        "s": s,
+        "Vt": Vt,
+        "global_mean": global_mean,
+        "item_bias": item_bias,
+    }
+```
 
 ```{python}
-
-import numpy as np
 from numba import njit
 
 
@@ -214,6 +255,7 @@ class NetflixFunkSVD:
         self.P = rng.normal(0.0, scale, size=(n_users, self.n_factors)).astype(np.float32)
         self.Q = rng.normal(0.0, scale, size=(n_items, self.n_factors)).astype(np.float32)
 
+        self.history_ = {"epoch": [], "lr": [], "probe_rmse": []}
         curr_lr = np.float32(self.lr)
         reg = np.float32(self.reg)
         n_obs = len(train_r)
@@ -222,6 +264,9 @@ class NetflixFunkSVD:
             perm = rng.permutation(n_obs).astype(np.int32)
             _sgd_epoch(train_u, train_i, train_r, perm, self.mu, self.bu, self.bi, self.P, self.Q, curr_lr, reg)
             probe_rmse = _compute_rmse(val_u, val_i, val_r, self.mu, self.bu, self.bi, self.P, self.Q)
+            self.history_["epoch"].append(epoch)
+            self.history_["lr"].append(float(curr_lr))
+            self.history_["probe_rmse"].append(probe_rmse)
             print(f"Epoch {epoch:02d}/{self.n_epochs:02d} | lr={curr_lr:.5f} | Probe RMSE: {probe_rmse:.4f}", flush=True)
             curr_lr = np.float32(curr_lr * self.lr_decay)
 
@@ -267,3 +312,99 @@ def run_netflix_pipeline(
 
 trained_model = run_netflix_pipeline()
 ```
+
+```{python}
+import matplotlib.pyplot as plt
+from sklearn.decomposition import PCA
+
+
+def plot_training_rmse(epochs, probe_rmses):
+    fig, ax = plt.subplots(figsize=(7, 4))
+    ax.plot(epochs, probe_rmses, marker="o", linewidth=2)
+    ax.set_title("Netflix Probe RMSE by Epoch")
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Probe RMSE")
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    return fig
+
+
+def plot_latent_biases_and_factors(model):
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.2))
+
+    # Left: Item bias distribution
+    axes[0].hist(model.bi, bins=50, edgecolor="none", alpha=0.85)
+    axes[0].set_title("Learned Movie Bias (bi) Distribution")
+    axes[0].set_xlabel("Bias Value")
+    axes[0].set_ylabel("Movie Count")
+    axes[0].grid(True, alpha=0.3)
+
+    # Right: 2D PCA of movie latent factors Q
+    pca = PCA(n_components=2, random_state=42)
+    coords = pca.fit_transform(model.Q)
+    sc = axes[1].scatter(
+        coords[:, 0],
+        coords[:, 1],
+        c=model.bi,
+        s=6,
+        alpha=0.55,
+        cmap="coolwarm",
+    )
+    axes[1].set_title(
+        f"Movie Latent Factors (2D PCA; var={pca.explained_variance_ratio_.sum():.1%})"
+    )
+    axes[1].set_xlabel("PC 1")
+    axes[1].set_ylabel("PC 2")
+    axes[1].grid(True, alpha=0.3)
+    plt.colorbar(sc, ax=axes[1], label="Movie Bias (bi)")
+
+    plt.tight_layout()
+    return fig
+
+def plot_singular_spectrum(s: np.ndarray):
+    energy = np.cumsum(s**2) / np.sum(s**2)
+    ranks = np.arange(1, len(s) + 1)
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+    axes[0].plot(ranks, s, marker="o", markersize=4)
+    axes[0].set_title("Truncated Singular Values (Scree Plot)")
+    axes[0].set_xlabel("Component Index (k)")
+    axes[0].set_ylabel("Singular Value")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(ranks, energy, marker="o", markersize=4)
+    axes[1].set_title("Cumulative Squared Singular Value Share")
+    axes[1].set_xlabel("Rank (k)")
+    axes[1].set_ylabel("Cumulative Share")
+    axes[1].set_ylim(0, 1.05)
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    return fig
+```
+
+```{python}
+#| label: plot-svd-diagnostics
+
+# 1. Plot Probe RMSE across training epochs
+fig_rmse = plot_training_rmse(
+    trained_model.history_["epoch"],
+    trained_model.history_["probe_rmse"],
+)
+plt.show(fig_rmse)
+
+# 2. Plot learned item bias distribution and 2D PCA of movie factors Q
+fig_factors = plot_latent_biases_and_factors(trained_model)
+plt.show(fig_factors)
+```
+
+```{python}
+#| label: plot-singular-values
+
+svd_res = truncated_svd_baseline("netflix_processed.npz", k=20, max_rows=2_000_000)
+# Note: truncated_svd_baseline returns approx_centered; if you return `s` from it, plot it here:
+fig_spec = plot_singular_spectrum(svd_res["s"])
+plt.show(fig_spec)
+```
+
+It appears from the above figures that the RMSE steadily converges with L2 regularization updates with Stochastic Gradient Descent. Additionally, the relative learned bias for ratings appears to be slightly negative with respect to movie count amplitudes. Furthermore, splitting the latent factors of the SVD into 2 Principal Components appears to represent the shift from positive to negative reception of movies in the mainstream. From the scree plot of singular values, it appears that index 11 is the elbow, meaning a rank 10 approximation of the SVD should be sufficient in representing the movie latent factors.
